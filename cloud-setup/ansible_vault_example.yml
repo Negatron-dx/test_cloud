@@ -1,0 +1,26 @@
+# vault.yml - Encrypted secrets (create with: ansible-vault create vault.yml)
+# This is an example - create your own encrypted version
+
+# Database credentials
+db_password: "your_secure_db_password"
+db_user: "app"
+db_name: "app"
+
+# Application secrets
+jwt_secret: "your_jwt_secret_key"
+api_key: "your_api_key"
+
+# Monitoring credentials
+grafana_admin_password: "your_secure_grafana_password"
+
+# SSL/TLS configuration
+ssl_email: "admin@your-domain.com"
+
+# To create encrypted version:
+# ansible-vault create vault.yml
+# 
+# To edit:
+# ansible-vault edit vault.yml
+# 
+# To run playbook with vault:
+# ansible-playbook -i inventory.ini playbook.yml --ask-vault-pass

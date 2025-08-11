@@ -1,0 +1,457 @@
+# playbook.yml
+---
+- name: Configure Ubuntu VM for Dojo-Task Application with Traefik and Monitoring
+  hosts: webservers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    github_repo: "{{ github_repo | default('https://github.com/yourusername/dojo-task.git') }}"
+    deploy_dir: "/home/{{ ansible_user }}/dojo-task"
+    domain_name: "{{ domain_name | default('dojo-task.com') }}"
+    email: "{{ email | default('admin@dojo-task.com') }}"
+
+  tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+      register: upgrade_result
+
+    - name: Install required system packages
+      apt:
+        name:
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - git
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-dev
+          - sshpass
+          - ufw
+        state: present
+
+    - name: Install Python 3.11
+      block:
+        - name: Add deadsnakes PPA
+          apt_repository:
+            repo: ppa:deadsnakes/ppa
+            state: present
+
+        - name: Install Python 3.11
+          apt:
+            name:
+              - python3.11
+              - python3.11-venv
+              - python3.11-dev
+            state: present
+
+    - name: Install Docker
+      block:
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+            state: present
+
+        - name: Install Docker
+          apt:
+            name: docker-ce
+            state: present
+
+        - name: Start and enable Docker
+          systemd:
+            name: docker
+            state: started
+            enabled: yes
+
+        - name: Add user to docker group
+          user:
+            name: "{{ ansible_user }}"
+            groups: docker
+            append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-{{ ansible_system }}-{{ ansible_architecture }}"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create docker-compose symlink
+      file:
+        src: /usr/local/bin/docker-compose
+        dest: /usr/bin/docker-compose
+        state: link
+
+    - name: Install Loki Docker plugin
+      docker_plugin:
+        plugin_name: grafana/loki-docker-driver:latest
+        alias: loki
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Configure Docker daemon for logging
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "10"
+            }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart docker
+
+    - name: Configure UFW firewall
+      block:
+        - name: Allow SSH
+          ufw:
+            rule: allow
+            port: '22'
+            proto: tcp
+
+        - name: Allow HTTP
+          ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+
+        - name: Allow HTTPS
+          ufw:
+            rule: allow
+            port: '443'
+            proto: tcp
+
+        - name: Allow Grafana
+          ufw:
+            rule: allow
+            port: '3000'
+            proto: tcp
+
+        - name: Allow Prometheus
+          ufw:
+            rule: allow
+            port: '9090'
+            proto: tcp
+
+        - name: Enable UFW
+          ufw:
+            state: enabled
+
+    - name: Create deployment directory
+      file:
+        path: "{{ deploy_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Clone or update application repository
+      git:
+        repo: "{{ github_repo }}"
+        dest: "{{ deploy_dir }}"
+        force: yes
+        version: main
+      become_user: "{{ ansible_user }}"
+
+    - name: Create monitoring configuration directory
+      file:
+        path: "{{ deploy_dir }}/monitoring"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: "{{ deploy_dir }}/monitoring/prometheus.yml"
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          rule_files:
+            # - "first_rules.yml"
+            # - "second_rules.yml"
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'node-exporter'
+              static_configs:
+                - targets: ['node-exporter:9100']
+
+            - job_name: 'cadvisor'
+              static_configs:
+                - targets: ['cadvisor:8080']
+
+            - job_name: 'docker'
+              static_configs:
+                - targets: ['host.docker.internal:9323']
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Create Loki configuration
+      copy:
+        dest: "{{ deploy_dir }}/monitoring/loki-config.yml"
+        content: |
+          auth_enabled: false
+
+          server:
+            http_listen_port: 3100
+
+          ingester:
+            lifecycler:
+              address: 127.0.0.1
+              ring:
+                kvstore:
+                  store: inmemory
+                replication_factor: 1
+              final_sleep: 0s
+            chunk_idle_period: 5m
+            chunk_retain_period: 30s
+
+          schema_config:
+            configs:
+              - from: 2020-05-15
+                store: boltdb-shipper
+                object_store: filesystem
+                schema: v11
+                index:
+                  prefix: index_
+                  period: 24h
+
+          storage_config:
+            boltdb_shipper:
+              active_index_directory: /tmp/loki/index
+              cache_location: /tmp/loki/index_cache
+              shared_store: filesystem
+            filesystem:
+              directory: /tmp/loki/chunks
+
+          limits_config:
+            enforce_metric_name: false
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+
+          chunk_store_config:
+            max_look_back_period: 0s
+
+          table_manager:
+            retention_deletes_enabled: false
+            retention_period: 0s
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Create Promtail configuration
+      copy:
+        dest: "{{ deploy_dir }}/monitoring/promtail-config.yml"
+        content: |
+          server:
+            http_listen_port: 9080
+            grpc_listen_port: 0
+
+          positions:
+            filename: /tmp/positions.yaml
+
+          clients:
+            - url: http://loki:3100/loki/api/v1/push
+
+          scrape_configs:
+            - job_name: containers
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: containerlogs
+                    __path__: /var/lib/docker/containers/*/*log
+
+              pipeline_stages:
+                - json:
+                    expressions:
+                      output: log
+                      stream: stream
+                      attrs:
+                - json:
+                    expressions:
+                      tag:
+                    source: attrs
+                - regex:
+                    expression: (?P<container_name>(?:[^|]*))\|
+                    source: tag
+                - timestamp:
+                    format: RFC3339Nano
+                    source: time
+                - labels:
+                    stream:
+                    container_name:
+                - output:
+                    source: output
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Create Grafana configuration
+      copy:
+        dest: "{{ deploy_dir }}/monitoring/grafana.ini"
+        content: |
+          [server]
+          domain = {{ domain_name }}
+          root_url = https://{{ domain_name }}/grafana/
+          serve_from_sub_path = true
+
+          [security]
+          admin_user = admin
+          admin_password = admin123
+
+          [auth.anonymous]
+          enabled = false
+
+          [log]
+          mode = console
+          level = info
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Update Docker Compose with correct domain and email
+      replace:
+        path: "{{ deploy_dir }}/docker-compose.yml"
+        regexp: 'test@gmail\.com'
+        replace: "{{ email }}"
+
+    - name: Update Docker Compose domain references
+      replace:
+        path: "{{ deploy_dir }}/docker-compose.yml"
+        regexp: 'dojo-task\.com'
+        replace: "{{ domain_name }}"
+
+    - name: Create app-network
+      docker_network:
+        name: app-network
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Make deploy.sh executable
+      file:
+        path: "{{ deploy_dir }}/deploy.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Stop any existing containers
+      shell: |
+        cd {{ deploy_dir }}
+        docker-compose down || true
+        docker-compose -f docker-compose.monitoring.yml down || true
+        docker system prune -f
+      become_user: "{{ ansible_user }}"
+      ignore_errors: yes
+
+    - name: Start monitoring stack
+      shell: |
+        cd {{ deploy_dir }}
+        docker-compose -f docker-compose.monitoring.yml up -d --build
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for Loki to be ready
+      wait_for:
+        port: 3100
+        host: localhost
+        delay: 10
+        timeout: 120
+
+    - name: Start application stack
+      shell: |
+        cd {{ deploy_dir }}
+        docker-compose up -d --build
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for Traefik to be ready
+      wait_for:
+        port: 80
+        host: localhost
+        delay: 10
+        timeout: 120
+
+    - name: Display deployment status
+      shell: |
+        cd {{ deploy_dir }}
+        echo "=== Docker Containers Status ==="
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        echo ""
+        echo "=== Docker Networks ==="
+        docker network ls
+        echo ""
+        echo "=== Monitoring Stack ==="
+        docker-compose -f docker-compose.monitoring.yml ps
+        echo ""
+        echo "=== Application Stack ==="
+        docker-compose ps
+      become_user: "{{ ansible_user }}"
+      register: deployment_status
+
+    - name: Show deployment status
+      debug:
+        var: deployment_status.stdout_lines
+
+    - name: Display success message
+      debug:
+        msg: |
+          ===============================================
+          🎉 Dojo-Task Application Deployed Successfully!
+          
+          📋 Application URLs:
+          Main Application: https://{{ domain_name }}
+          Grafana Dashboard: https://{{ domain_name }}/grafana
+          Prometheus: https://{{ domain_name }}/prometheus
+          Adminer (DB): https://db.{{ domain_name }}
+          cAdvisor: https://{{ domain_name }}/cadvisor
+          
+          🔐 Default Credentials:
+          Grafana: admin / admin123
+          
+          📡 Server Details:
+          IP Address: {{ ansible_default_ipv4.address }}
+          SSH: sshpass -p '{{ ansible_password }}' ssh {{ ansible_user }}@{{ ansible_default_ipv4.address }}
+          
+          ⚠️  DNS Configuration Required:
+          Please configure your DNS to point these domains to {{ ansible_default_ipv4.address }}:
+          - {{ domain_name }}
+          - www.{{ domain_name }}
+          - db.{{ domain_name }}
+          
+          📁 Application Directory: {{ deploy_dir }}
+          
+          🔧 Management Commands:
+          - View logs: cd {{ deploy_dir }} && docker-compose logs -f
+          - Restart app: cd {{ deploy_dir }} && docker-compose restart
+          - Update app: cd {{ deploy_dir }} && git pull && docker-compose up -d --build
+          ===============================================
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted

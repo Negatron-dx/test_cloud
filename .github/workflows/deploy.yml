@@ -1,0 +1,246 @@
+# .github/workflows/deploy.yml - Enhanced CI/CD Pipeline
+name: Deploy Dojo-Task Application
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  DEPLOY_DIR: "/home/${{ secrets.SERVER_USERNAME }}/dojo-task"
+
+jobs:
+  lint:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js (if frontend exists)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+        if: hashFiles('frontend/package.json') != ''
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+        if: hashFiles('frontend/package.json') != ''
+
+      - name: Lint frontend
+        run: |
+          cd frontend
+          npm run lint || true
+        if: hashFiles('frontend/package.json') != ''
+
+      - name: Set up Python (if backend exists)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+        if: hashFiles('backend/requirements.txt') != ''
+
+      - name: Install Python dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+        if: hashFiles('backend/requirements.txt') != ''
+
+      - name: Lint backend
+        run: |
+          cd backend
+          python -m flake8 . || true
+          python -m black --check . || true
+        if: hashFiles('backend/requirements.txt') != ''
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy:
+    name: Deploy to Server
+    needs: [lint, security-scan]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup deployment variables
+        run: |
+          echo "TIMESTAMP=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_ENV
+          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> $GITHUB_ENV
+
+      - name: Pre-deployment health check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            echo "=== Pre-deployment System Check ==="
+            df -h
+            free -h
+            docker system df
+            echo "=== Current Container Status ==="
+            cd ${{ env.DEPLOY_DIR }} && docker-compose ps || true
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            set -e
+            
+            # Create deployment directory
+            mkdir -p ${{ env.DEPLOY_DIR }}
+            cd ${{ env.DEPLOY_DIR }}
+            
+            # Backup current deployment
+            echo "=== Creating Backup ==="
+            if [ -d ".git" ]; then
+              BACKUP_DIR="../dojo-task-backup-${{ env.TIMESTAMP }}"
+              cp -r . "$BACKUP_DIR" || true
+              echo "Backup created at: $BACKUP_DIR"
+            fi
+            
+            # Update repository
+            echo "=== Updating Repository ==="
+            if [ ! -d ".git" ]; then
+              git clone ${{ github.server_url }}/${{ github.repository }}.git .
+            else
+              git fetch origin
+              git reset --hard origin/main
+            fi
+            
+            # Ensure deploy script is executable
+            chmod +x deploy.sh
+            
+            # Run deployment
+            echo "=== Running Deployment ==="
+            ./deploy.sh
+            
+            # Verify deployment
+            echo "=== Verifying Deployment ==="
+            sleep 30
+            docker-compose ps
+            docker-compose logs --tail=50
+
+      - name: Post-deployment health check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            cd ${{ env.DEPLOY_DIR }}
+            echo "=== Post-deployment Health Check ==="
+            
+            # Check container health
+            echo "Container Status:"
+            docker-compose ps
+            
+            # Check application endpoints
+            echo "Testing endpoints..."
+            curl -f -s -o /dev/null http://localhost:80 && echo "✅ HTTP endpoint OK" || echo "❌ HTTP endpoint FAILED"
+            
+            # Check monitoring stack
+            echo "Monitoring Stack:"
+            docker-compose -f docker-compose.monitoring.yml ps
+            
+            # System resources after deployment
+            echo "System Resources:"
+            df -h | head -5
+            free -h
+
+      - name: Notify deployment status
+        uses: 8398a7/action-slack@v3
+        if: always()
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          text: |
+            Deployment ${{ job.status }}!
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ env.SHORT_SHA }}
+            Server: ${{ secrets.SERVER_HOST }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: failure() && github.ref == 'refs/heads/main'
+    needs: [deploy]
+    
+    steps:
+      - name: Rollback to previous version
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            cd ${{ env.DEPLOY_DIR }}
+            
+            # Find latest backup
+            LATEST_BACKUP=$(ls -t ../dojo-task-backup-* 2>/dev/null | head -1)
+            
+            if [ -n "$LATEST_BACKUP" ] && [ -d "$LATEST_BACKUP" ]; then
+              echo "Rolling back to: $LATEST_BACKUP"
+              
+              # Stop current services
+              docker-compose down || true
+              docker-compose -f docker-compose.monitoring.yml down || true
+              
+              # Restore backup
+              cd ..
+              rm -rf dojo-task
+              mv "$LATEST_BACKUP" dojo-task
+              cd dojo-task
+              
+              # Restart services
+              chmod +x deploy.sh
+              ./deploy.sh
+              
+              echo "Rollback completed successfully"
+            else
+              echo "No backup found for rollback"
+              exit 1
+            fi
