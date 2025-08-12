@@ -188,12 +188,12 @@ resource "azurerm_linux_virtual_machine" "main" {
 # Generate Ansible inventory
 resource "local_file" "ansible_inventory" {
   depends_on = [azurerm_linux_virtual_machine.main]
-  content = templatefile("${path.module}/inventory.tpl", {
+  content = templatefile("${path.module}/../ansible/inventory.tpl", {
     vm_ip = azurerm_public_ip.main.ip_address
     admin_username = var.admin_username
     admin_password = random_password.vm_password.result
   })
-  filename = "${path.module}/inventory.ini"
+  filename = "${path.module}/../ansible/inventory.ini"
 }
 
 # Save VM credentials
@@ -222,6 +222,6 @@ resource "null_resource" "run_ansible" {
   }
 
   provisioner "local-exec" {
-    command = "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini playbook.yml"
+  command = "ansible-playbook -i ${path.module}/../ansible/inventory.ini ${path.module}/../ansible/playbook.yml"
   }
 }

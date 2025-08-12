@@ -1,6 +1,6 @@
 # Resource configuration
 resource_group_name = "rg-dojo-task-prod"
-location           = "East US"
+location           = "West US 2"
 prefix             = "dojo-task-prod"
 vm_size           = "Standard_B4ms"  # 4 vCPUs, 16GB RAM
 admin_username    = "azureuser"
