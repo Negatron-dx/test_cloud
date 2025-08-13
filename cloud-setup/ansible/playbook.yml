@@ -177,12 +177,6 @@
         state: present
       become_user: "{{ ansible_user }}"
 
-    # - name: Make deploy.sh executable
-    #   file:
-    #     path: "{{ deploy_dir }}/deploy.sh"
-    #     mode: '0755'
-    #     owner: "{{ ansible_user }}"
-    #     group: "{{ ansible_user }}"
 
     - name: Stop any existing containers
       shell: |
