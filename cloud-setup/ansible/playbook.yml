@@ -6,7 +6,7 @@
   gather_facts: yes
 
   vars:
-    github_repo: "{{ github_repo | default('https://github.com/yourusername/dojo-task.git') }}"
+    github_repo: "{{ github_repo | default('https://github.com/mroluwasesan/full-stack-FastAPI-backend-and-React-Frontend.gitt') }}"
     deploy_dir: "/home/{{ ansible_user }}/dojo-task"
     domain_name: "{{ domain_name | default('dojo-task.com') }}"
     email: "{{ email | default('admin@dojo-task.com') }}"
