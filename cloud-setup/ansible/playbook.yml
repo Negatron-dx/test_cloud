@@ -6,7 +6,7 @@
   gather_facts: yes
 
   vars:
-    github_repo: "{{ github_repo | default('https://github.com/mroluwasesan/full-stack-FastAPI-backend-and-React-Frontend.gitt') }}"
+    github_repo: "https://github.com/mroluwasesan/full-stack-FastAPI-backend-and-React-Frontend.git"
     deploy_dir: "/home/{{ ansible_user }}/dojo-task"
     domain_name: "{{ domain_name | default('dojo-task.com') }}"
     email: "{{ email | default('admin@dojo-task.com') }}"
@@ -95,13 +95,31 @@
         src: /usr/local/bin/docker-compose
         dest: /usr/bin/docker-compose
         state: link
+    
+    - name: Restart Docker service after user group change
+      systemd:
+        name: docker
+        state: restarted
+    
+    - name: Reset SSH connection to allow group changes to take effect
+      meta: reset_connection
+
+    - name: Wait for Docker to be ready
+      wait_for:
+        port: 2376
+        host: localhost
+        delay: 5
+        timeout: 30
+      ignore_errors: yes
 
     - name: Install Loki Docker plugin
-      docker_plugin:
+      community.docker.docker_plugin:
         plugin_name: grafana/loki-docker-driver:latest
         alias: loki
         state: present
       become_user: "{{ ansible_user }}"
+      retries: 3
+      delay: 10
 
     - name: Configure Docker daemon for logging
       copy:
@@ -213,22 +231,22 @@
         delay: 10
         timeout: 120
 
-    - name: Display deployment status
-      shell: |
-        cd {{ deploy_dir }}
-        echo "=== Docker Containers Status ==="
-        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-        echo ""
-        echo "=== Docker Networks ==="
-        docker network ls
-        echo ""
-        echo "=== Monitoring Stack ==="
-        docker-compose -f docker-compose.monitoring.yml ps
-        echo ""
-        echo "=== Application Stack ==="
-        docker-compose ps
-      become_user: "{{ ansible_user }}"
-      register: deployment_status
+    # - name: Display deployment status
+    #   shell: |
+    #     cd {{ deploy_dir }}
+    #     echo "=== Docker Containers Status ==="
+    #     docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+    #     echo ""
+    #     echo "=== Docker Networks ==="
+    #     docker network ls
+    #     echo ""
+    #     echo "=== Monitoring Stack ==="
+    #     docker-compose -f docker-compose.monitoring.yml ps
+    #     echo ""
+    #     echo "=== Application Stack ==="
+    #     docker-compose ps
+    #   become_user: "{{ ansible_user }}"
+    #   register: deployment_status
 
     - name: Show deployment status
       debug:
