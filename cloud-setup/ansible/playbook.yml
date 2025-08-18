@@ -189,13 +189,6 @@
         version: main
       become_user: "{{ ansible_user }}"
 
-    - name: Create app-network
-      docker_network:
-        name: app-network
-        state: present
-      become_user: "{{ ansible_user }}"
-
-
     - name: Stop any existing containers
       shell: |
         cd {{ deploy_dir }}
@@ -205,11 +198,33 @@
       become_user: "{{ ansible_user }}"
       ignore_errors: yes
 
+    - name: Create app-network using docker command
+      shell: |
+        if ! docker network ls | grep -q 'app-network'; then
+          docker network create app-network
+          echo "Network created"
+        else
+          echo "Network already exists"
+        fi
+      become_user: "{{ ansible_user }}"
+      register: network_result
+
+    - name: Display network creation result
+      debug:
+        var: network_result.stdout
+
+    - name: Verify app-network exists
+      shell: docker network inspect app-network
+      become_user: "{{ ansible_user }}"
+      register: network_check
+      failed_when: network_check.rc != 0
+
     - name: Start monitoring stack
       shell: |
         cd {{ deploy_dir }}
         docker-compose -f docker-compose.monitoring.yml up -d --build
       become_user: "{{ ansible_user }}"
+      when: network_created.changed or network_created.success
 
     - name: Wait for Loki to be ready
       wait_for:
